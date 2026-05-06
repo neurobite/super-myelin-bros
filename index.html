@@ -1314,7 +1314,7 @@ const player = {
 
     if (this.jumpBuffer > 0) this.jump();
     if (this.invulnerableFrames > 0) this.invulnerableFrames--;
-    if (this.y > canvas.height) gameState = GAME_STATE.GAME_OVER;
+    if (this.y > canvas.height && gameState !== GAME_STATE.PML_BOSS && gameState !== GAME_STATE.PML_VICTORY) gameState = GAME_STATE.GAME_OVER;
   },
 
   draw() {
@@ -3137,6 +3137,16 @@ function enterPMLBoss() {
   projectiles.length = 0;
   pickups.length = 0;
 
+  // Set up a solid floor for the PML arena so the player doesn't fall
+  platforms.length = 0;
+  platforms.push(new Platform(cameraX, canvas.height - 90, canvas.width * 6));
+
+  // Reset player position to a safe standing spot on that floor
+  player.x = 80;
+  player.y = canvas.height - 90 - player.h;
+  player.vy = 0;
+  player.isGrounded = true;
+
   PML.phase = 1;
   PML.hp = 12;
   PML.hitFlash = 0;
@@ -3187,8 +3197,16 @@ function pmlBossLoop() {
   platforms.forEach(p => p.draw());
 
   // ── Boss body ────────────────────────────────────────────────────────────
-  let bx = canvas.width * 0.68;
-  let by = canvas.height * 0.38;
+  // Lowered + floating so the player (rooted at x≈80) can actually reach it.
+  // Boss sweeps horizontally across the arena, dipping low enough to be stompable.
+  // Player feet on floor ≈ 328; jump peak ≈ 188; boss center at y≈245 sits
+  // inside the falling-stomp window (feet hit y∈[by, by+30] coming down).
+  // Sweep must cover x=80 (player center) → range goes from ~50 to ~700.
+  let sweepCenter = canvas.width * 0.47;
+  let sweepRange  = canvas.width * 0.42;
+  let sweepSpeed  = PML.phase === 1 ? 0.018 : PML.phase === 2 ? 0.026 : 0.034;
+  let bx = sweepCenter + Math.sin(frames * sweepSpeed) * sweepRange;
+  let by = canvas.height * 0.55 + Math.sin(frames * 0.045) * 22;
   let flashAlpha = PML.hitFlash > 0 ? 0.9 : 0;
   let phaseColor = PML.phase === 1 ? '#8e44ad' : PML.phase === 2 ? '#c0392b' : '#e74c3c';
   let phaseGlow  = PML.phase === 1 ? '#c39bd3' : PML.phase === 2 ? '#e74c3c' : '#ff6b6b';
@@ -3341,6 +3359,13 @@ function pmlBossLoop() {
 
   // ── Player update + draw ─────────────────────────────────────────────────
   player.update();
+  checkCollisions();   // ← floor platform we set up in enterPMLBoss now actually catches the player
+  // Safety clamp: never let the player leave the bottom of the arena
+  if (player.y > canvas.height - player.h) {
+    player.y = canvas.height - 90 - player.h;
+    player.vy = 0;
+    player.isGrounded = true;
+  }
   checkPMLBossCollisions(bx, by, 62);
 
   // Pickup draw
@@ -3447,7 +3472,7 @@ function checkPMLBossCollisions(bx, by, radius) {
 function damagePMLBoss(dmg, label, color) {
   PML.hp -= dmg;
   PML.hitFlash = 12;
-  spawnFloat(canvas.width * 0.68 + cameraX, canvas.height * 0.28, label || ('-' + dmg + ' HP'), color || '#f1c40f');
+  spawnFloat(canvas.width * 0.68 + cameraX, canvas.height * 0.45, label || ('-' + dmg + ' HP'), color || '#f1c40f');
   triggerShake(8);
   checkPMLPhase();
 }
@@ -3464,7 +3489,7 @@ function checkPMLPhase() {
       let a = Math.random() * Math.PI * 2;
       let spd = 3 + Math.random() * 6;
       let colors = ['#2ecc71', '#f1c40f', '#3498db', '#e74c3c', '#fff'];
-      particles.push({ x: canvas.width * 0.68 + cameraX, y: canvas.height * 0.38,
+      particles.push({ x: canvas.width * 0.68 + cameraX, y: canvas.height * 0.55,
         vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 2,
         life: 60 + Math.random() * 40, maxLife: 100,
         color: colors[Math.floor(Math.random() * colors.length)], size: 4 });
