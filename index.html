@@ -3304,7 +3304,10 @@ function pmlBossLoop() {
     // Fire astrocyte projectile toward player
     let tx = player.x + player.w / 2;
     let ty = player.y + player.h / 2;
-    let dx = tx - (bx - canvas.width * 0 + cameraX);
+    // Both tx and bx are screen-space; aim directly without cameraX (the old
+    // (bx - canvas.width * 0 + cameraX) was a leftover from world-space math
+    // and made the boss aim past the player during PML where camera is locked).
+    let dx = tx - bx;
     let dy = ty - by;
     let d = Math.sqrt(dx * dx + dy * dy) || 1;
     let spd = PML.phase === 1 ? 3 : PML.phase === 2 ? 4.5 : 6;
@@ -3421,7 +3424,8 @@ function pmlBossLoop() {
   if (powerActive === 0 && powerType !== -1) powerType = -1;
   for (let b of BROS) if (b.powerCooldown > 0) b.powerCooldown--;
   updatePowerUI();
-  if (player.invulnerableFrames > 0) player.invulnerableFrames--;
+  // NOTE: player.invulnerableFrames is already decremented inside player.update().
+  // Decrementing it again here previously halved the i-frame window during PML.
   if (pickupInvincible > 0) pickupInvincible--;
 
   PML.phaseTimer += timeScale;
@@ -3482,6 +3486,12 @@ function checkPMLPhase() {
     PML.hp = 0;
     gameState = GAME_STATE.PML_VICTORY;
     PML.victoryTimer = 0;
+    // Clear in-flight boss projectiles so they can't hit the player during the
+    // victory cinematic. Also clear weapon projectiles for visual cleanliness.
+    PML.projectiles.length = 0;
+    projectiles.length = 0;
+    // Grant brief invulnerability so any same-frame hit can't end the run.
+    player.invulnerableFrames = Math.max(player.invulnerableFrames, 120);
     score += 5000;
     triggerShake(20);
     // Firework particles
@@ -4472,11 +4482,14 @@ function resetGame() {
   resetRunAchievements();
 
   BROS.forEach(b => { b.hp = b.maxHP; b.powerCooldown = 0; });
-  currentBroIndex = 0;
+  // Honor splash-screen bro selection (defaults to 0 = Anton for new sessions)
+  currentBroIndex = (typeof selectedStartBro === 'number'
+                     && selectedStartBro >= 0
+                     && selectedStartBro < BROS.length) ? selectedStartBro : 0;
   powerActive = 0;
   powerType = -1;
 
-  let bro = BROS[0];
+  let bro = BROS[currentBroIndex];
   broNameEl.innerText = bro.name + (broLevel(bro) > 0 ? ' LV ' + broLevel(bro) : '');
   broNameEl.style.color = bro.color;
   broStatsEl.innerText = `SPD: ${Math.round(bro.speedMulti * 5)} | JMP: ${Math.round(bro.jumpForce / 4)}`;
@@ -4657,9 +4670,28 @@ const levelBannerEl = document.getElementById('level-banner');
 const brosCanvas = document.getElementById('bros-canvas');
 const brosCtx = brosCanvas.getContext('2d');
 
-function drawSplashBro(c, x, y, scale, broIdx) {
+function drawSplashBro(c, x, y, scale, broIdx, isSelected) {
   let bro = BROS[broIdx];
   let w = 48 * scale, h = 72 * scale;
+
+  // Selection highlight: glowing ring + brighter name
+  if (isSelected) {
+    c.save();
+    let cx = x + w / 2;
+    let cy = y + h / 2;
+    let pulse = 1 + Math.sin(Date.now() * 0.005) * 0.08;
+    let r = Math.max(w, h) * 0.75 * pulse;
+    let grad = c.createRadialGradient(cx, cy, r * 0.4, cx, cy, r);
+    grad.addColorStop(0, bro.color + '66');
+    grad.addColorStop(0.7, bro.color + '22');
+    grad.addColorStop(1, 'transparent');
+    c.fillStyle = grad;
+    c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = bro.color;
+    c.lineWidth = 2;
+    c.beginPath(); c.arc(cx, cy, r * 0.85, 0, Math.PI * 2); c.stroke();
+    c.restore();
+  }
   c.fillStyle = '#fff';
   c.fillRect(x + 4*scale, y + 22*scale, w - 8*scale, h - 38*scale);
   c.fillStyle = bro.color;
@@ -4712,17 +4744,69 @@ function drawSplashBro(c, x, y, scale, broIdx) {
   c.fillText(bro.name, x + w/2, y + h + 12);
 }
 
+// Which bro the player has selected to start the run with. Defaults to Anton (0)
+// for backward compat, but the user can click/tap any bro on the splash to swap.
+let selectedStartBro = 0;
+// Cache of click/tap hit zones for each bro on the splash, in canvas-local coords.
+let _splashBroZones = [];
+
 function drawSplash() {
   brosCtx.clearRect(0, 0, brosCanvas.width, brosCanvas.height);
   let scale = 0.9;
   let spacing = 110;
   let totalW = spacing * 3;
   let startX = (brosCanvas.width - totalW) / 2 + 30;
+  let bw = 48 * scale, bh = 72 * scale;
+  _splashBroZones = [];
   for (let i = 0; i < 3; i++) {
-    drawSplashBro(brosCtx, startX + i * spacing, 18, scale, i);
+    let bx = startX + i * spacing;
+    let by = 18;
+    drawSplashBro(brosCtx, bx, by, scale, i, i === selectedStartBro);
+    // Generous hit zone — covers the bro sprite + the name label below
+    _splashBroZones.push({
+      idx: i,
+      x: bx - 14,
+      y: by - 10,
+      w: bw + 28,
+      h: bh + 28
+    });
   }
 }
 drawSplash();
+// Re-render the splash periodically so the selection ring pulses
+setInterval(() => {
+  if (gameState === GAME_STATE.START) drawSplash();
+}, 60);
+
+// Click / tap a bro on the splash to pick who starts the run
+function _pickBroFromSplashEvent(clientX, clientY) {
+  let rect = brosCanvas.getBoundingClientRect();
+  // Map from CSS pixels to canvas-internal coords
+  let scaleX = brosCanvas.width / rect.width;
+  let scaleY = brosCanvas.height / rect.height;
+  let cx = (clientX - rect.left) * scaleX;
+  let cy = (clientY - rect.top) * scaleY;
+  for (let z of _splashBroZones) {
+    if (cx >= z.x && cx <= z.x + z.w && cy >= z.y && cy <= z.y + z.h) {
+      selectedStartBro = z.idx;
+      drawSplash();
+      return true;
+    }
+  }
+  return false;
+}
+
+brosCanvas.style.cursor = 'pointer';
+brosCanvas.addEventListener('click', e => {
+  e.stopPropagation();
+  _pickBroFromSplashEvent(e.clientX, e.clientY);
+});
+brosCanvas.addEventListener('touchstart', e => {
+  if (!e.touches || !e.touches[0]) return;
+  e.preventDefault();
+  e.stopPropagation();
+  _pickBroFromSplashEvent(e.touches[0].clientX, e.touches[0].clientY);
+}, { passive: false });
 
 function showLevelBanner(name) {
   levelBannerEl.innerText = name;
